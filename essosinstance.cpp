@@ -26,6 +26,13 @@
 
 #include <iostream>
 
+#ifdef ENABLE_ERM
+#include <map>
+#include <essos-resmgr.h>
+
+    EssRMgr* gEssRMgr;
+    std::map<std::string, bool> gAppsAVBlacklistStatus;
+#endif
 #ifdef RDKSHELL_ENABLE_KEY_METADATA
 EssInputDeviceMetadata gInputDeviceMetadata = {};
 #endif //RDKSHELL_ENABLE_KEY_METADATA
@@ -190,6 +197,28 @@ static EssKeyListener essosKeyListener=
     essosKeyReleased
 };
 
+static void essosPointerMotion(void *userData, int x, int y)
+{
+    RdkShell::EssosInstance::instance()->onPointerMotion(x, y);
+}
+
+static void essosPointerButtonPressed(void *userData, int buttonId, int x, int y)
+{
+    RdkShell::EssosInstance::instance()->onPointerButtonPress(buttonId, x, y);
+}
+
+static void essosPointerButtonReleased(void *userData, int buttonId, int x, int y)
+{
+    RdkShell::EssosInstance::instance()->onPointerButtonRelease(buttonId, x, y);
+}
+
+static EssPointerListener pointerListener =
+{
+   essosPointerMotion,
+   essosPointerButtonPressed,
+   essosPointerButtonReleased
+};
+
 static void essosDisplaySize( void *userData, int width, int height )
 {
     RdkShell::EssosInstance::instance()->onDisplaySizeChanged((uint32_t)width, (uint32_t)height);
@@ -228,6 +257,12 @@ namespace RdkShell
             gInputDeviceMetadata.devicePhysicalAddress = 0;
         }
 #endif //RDKSHELL_ENABLE_KEY_METADATA
+#ifdef ENABLE_ERM
+            if (nullptr != gEssRMgr)
+            {
+                EssRMgrDestroy(gEssRMgr );
+            }
+#endif //ENABLE_ERM
     }
 
     EssosInstance* EssosInstance::instance()
@@ -268,6 +303,10 @@ namespace RdkShell
                 essosError = true;
             }
 #endif //RDKSHELL_ENABLE_KEY_METADATA
+            if (!EssContextSetPointerListener(mEssosContext, 0, &pointerListener))
+            {
+                essosError = true;
+            }
             if ( !EssContextSetKeyRepeatInitialDelay(mEssosContext, (int)mKeyInitialDelay))
             {
                 essosError = true;
@@ -314,6 +353,12 @@ namespace RdkShell
                 RdkShell::Logger::log(LogLevel::Information,  "Essos error during initialization: %s", errorDetail);
             }
         }
+#ifdef ENABLE_ERM
+        gEssRMgr = EssRMgrCreate();
+        RdkShell::Logger::log(LogLevel::Information,  "EssRMgrCreate %s",(gEssRMgr != nullptr)?"succeeded":"failed");
+#else
+        RdkShell::Logger::log(LogLevel::Error,  "ENABLE_ERM not defined");
+#endif
     }
 
     void EssosInstance::initialize(bool useWayland, uint32_t width, uint32_t height)
@@ -336,7 +381,7 @@ namespace RdkShell
         if (mKeyInputsIgnored)
         {
             RdkShell::Logger::log(LogLevel::Information,  "key inputs ignored for press keycode: %d ", keyCode);
-	    return;
+            return;
         }		
         CompositorController::onKeyPress(keyCode, flags, metadata);
     }
@@ -346,9 +391,36 @@ namespace RdkShell
         if (mKeyInputsIgnored)
         {
             RdkShell::Logger::log(LogLevel::Information,  "key inputs ignored for release keycode: %d ", keyCode);
-	    return;
+            return;
         }
         CompositorController::onKeyRelease(keyCode, flags, metadata);
+    }
+
+    void EssosInstance::onPointerMotion(uint32_t x, uint32_t y)
+    {
+        if (mKeyInputsIgnored)
+            return;
+        CompositorController::onPointerMotion(x, y);
+    }
+
+    void EssosInstance::onPointerButtonPress(uint32_t keyCode, uint32_t x, uint32_t y)
+    {
+        if (mKeyInputsIgnored)
+        {
+            RdkShell::Logger::log(LogLevel::Information,  "key inputs ignored for pointer button press keycode: %d ", keyCode);
+	        return;
+        }
+        CompositorController::onPointerButtonPress(keyCode, x, y);
+    }
+
+    void EssosInstance::onPointerButtonRelease(uint32_t keyCode, uint32_t x, uint32_t y)
+    {
+        if (mKeyInputsIgnored)
+        {
+            RdkShell::Logger::log(LogLevel::Information,  "key inputs ignored for pointer button release keycode: %d ", keyCode);
+	        return;
+        }
+        CompositorController::onPointerButtonRelease(keyCode, x, y);
     }
 
     void EssosInstance::onDisplaySizeChanged(uint32_t width, uint32_t height)
@@ -415,5 +487,40 @@ namespace RdkShell
     void EssosInstance::ignoreKeyInputs(bool ignore)
     {
         mKeyInputsIgnored = ignore;
+    }
+
+    bool EssosInstance::isErmEnabled()
+    {
+#ifdef ENABLE_ERM
+        return true;
+#else
+        return false;
+#endif // ENABLE_ERM
+    }
+
+    bool EssosInstance::setAVBlocked(std::string app, bool blockAV)
+    {
+        bool status = true;
+#ifdef ENABLE_ERM
+        status = blockAV?EssRMgrAddToBlackList(gEssRMgr, app.c_str()):EssRMgrRemoveFromBlackList(gEssRMgr, app.c_str());
+        if (true == status)
+        {
+            gAppsAVBlacklistStatus[app] = blockAV;
+        }
+#endif
+        return status;
+    }
+    void EssosInstance::getBlockedAVApplications(std::vector<std::string> &appsList)
+    {
+#ifdef ENABLE_ERM
+        std::map<std::string, bool>::iterator appsItr = gAppsAVBlacklistStatus.begin();
+        for (;appsItr != gAppsAVBlacklistStatus.end(); appsItr++)
+        {
+            if (true == appsItr->second)
+            {
+                appsList.push_back(appsItr->first);
+            }
+        }
+#endif
     }
 }

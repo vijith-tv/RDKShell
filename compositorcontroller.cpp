@@ -31,6 +31,7 @@
 #include "string.h"
 #include "rdkshellimage.h"
 #include "rdkshellrect.h"
+#include "cursor.h"
 #include <iostream>
 #include <map>
 #include <ctime>
@@ -62,6 +63,7 @@ namespace RdkShell
         std::map<uint32_t, std::vector<KeyListenerInfo>> keyListenerInfo;
         std::vector<std::shared_ptr<RdkShellEventListener>> eventListeners;
         std::string mimeType;
+	bool autoDestroy;
     };
 
     struct KeyInterceptInfo
@@ -86,6 +88,14 @@ namespace RdkShell
         std::shared_ptr<RdkShell::Image> image;
     };
 
+    struct KeyRepeatConfig
+    {
+        KeyRepeatConfig() : enabled(false), initialDelay(500), repeatInterval(250) {}
+        int initialDelay;
+        int repeatInterval;
+        bool enabled;
+    };
+
     typedef std::vector<CompositorInfo> CompositorList;
     typedef CompositorList::iterator CompositorListIterator;
 
@@ -103,8 +113,10 @@ namespace RdkShell
     double gNextInactiveEventTime = RdkShell::seconds() + gInactivityIntervalInSeconds;
     uint32_t gLastKeyCode = 0;
     uint32_t gLastKeyModifiers = 0;
+    uint64_t gLastKeyMetadata = 0;
     std::shared_ptr<RdkShellEventListener> gRdkShellEventListener;
     double gLastKeyPressStartTime = 0.0;
+    double gLastKeyRepeatTime = 0.0;
     RdkShellCompositorType gRdkShellCompositorType = NESTED;
     std::shared_ptr<RdkShell::Image> gSplashImage = nullptr;
     bool gShowSplashImage = false;
@@ -123,6 +135,8 @@ namespace RdkShell
     bool gPowerKeyReleaseReceived = false;
     bool gRdkShellPowerKeyReleaseOnlyEnabled = false;
     bool gIgnoreKeyInputEnabled = false;
+    std::shared_ptr<Cursor> gCursor = nullptr;
+    KeyRepeatConfig gKeyRepeatConfig;
 
     std::string standardizeName(const std::string& clientName)
     {
@@ -244,27 +258,28 @@ namespace RdkShell
     
     bool interceptKey(uint32_t keycode, uint32_t flags, uint64_t metadata, bool isPressed)
     {
-      bool ret = false;
-      if (gKeyInterceptInfoMap.end() != gKeyInterceptInfoMap.find(keycode))
-      {
-        for (int i=0; i<gKeyInterceptInfoMap[keycode].size(); i++) {
-          struct KeyInterceptInfo& info = gKeyInterceptInfoMap[keycode][i];
-          if (info.flags == flags)
-          {
-            Logger::log(Debug, "Key %d intercepted by client %s", keycode, info.compositorInfo.name.c_str());
-            if (isPressed)
+        bool ret = false;
+        if (gKeyInterceptInfoMap.end() != gKeyInterceptInfoMap.find(keycode))
+        {
+            for (int i=0; i<gKeyInterceptInfoMap[keycode].size(); i++)
             {
-              info.compositorInfo.compositor->onKeyPress(keycode, flags, metadata);
+                struct KeyInterceptInfo& info = gKeyInterceptInfoMap[keycode][i];
+                if (info.flags == flags && info.compositorInfo.compositor->getInputEventsEnabled())
+                {
+                    Logger::log(Debug, "Key %d intercepted by client %s", keycode, info.compositorInfo.name.c_str());
+                    if (isPressed)
+                    {
+                        info.compositorInfo.compositor->onKeyPress(keycode, flags, metadata);
+                    }
+                    else
+                    {
+                        info.compositorInfo.compositor->onKeyRelease(keycode, flags, metadata);
+                    }
+                    ret = true;
+                }
             }
-            else
-            {
-              info.compositorInfo.compositor->onKeyRelease(keycode, flags, metadata);
-            }
-            ret = true;
-          }
         }
-      }
-      return ret;
+        return ret;
     }
 
     void evaluateKeyListeners(struct CompositorInfo& compositor, uint32_t keycode, uint32_t flags, bool& foundlistener, bool& activate, bool& propagate)
@@ -318,6 +333,12 @@ namespace RdkShell
         bool isFocusedCompositor = true;
         while (compositorIterator != gCompositorList.end())
         {
+          if (!compositorIterator->compositor->getInputEventsEnabled())
+          {
+              compositorIterator++;
+              continue;
+          }
+
           #ifdef RDKSHELL_ENABLE_KEYBUBBING_TOP_MODE
           if (compositorIterator->name == focusedCompositorName)
           {
@@ -370,6 +391,34 @@ namespace RdkShell
             break;
           }
           compositorIterator++;
+        }
+    }
+
+    void updateKeyRepeat()
+    {
+        if (gKeyRepeatConfig.enabled)
+        {
+            if (gLastKeyPressStartTime > 0.0)
+            {
+                double currentTime = RdkShell::seconds();
+                if (gLastKeyRepeatTime == 0.0)
+                {
+                    if ((currentTime - gLastKeyPressStartTime) * 1000.0 > gKeyRepeatConfig.initialDelay)
+                    {
+                        CompositorController::onKeyPress(gLastKeyCode, gLastKeyModifiers, gLastKeyMetadata);
+                        gLastKeyRepeatTime = currentTime;
+                    }
+                }
+                else
+                {
+                    if ((currentTime - gLastKeyRepeatTime) * 1000.0 > gKeyRepeatConfig.repeatInterval)
+                    {
+                        CompositorController::onKeyPress(gLastKeyCode, gLastKeyModifiers, gLastKeyMetadata);
+                        gLastKeyRepeatTime = currentTime;
+                    }
+                }
+
+            }
         }
     }
 
@@ -484,6 +533,17 @@ namespace RdkShell
                 Logger::log(LogLevel::Information,  "invalid compositor type, setting to nested by default ");
             }
         }
+
+        const char* cursorImageName = getenv("RDKSHELL_CURSOR_IMAGE");
+        if (cursorImageName == nullptr)
+        {
+            Logger::log(LogLevel::Information,  "cursor image not set");
+        }
+        else
+        {
+            gCursor = std::make_shared<Cursor>(std::string(cursorImageName));
+        }
+
         sCompositorInitialized = true;
     }
 
@@ -584,7 +644,14 @@ namespace RdkShell
             {
                 gPendingKeyUpListeners.push_back(gFocusedCompositor.compositor);
             }
+
+            if (gFocusedCompositor.compositor)
+            {
+                gFocusedCompositor.compositor->setFocused(false);
+            }
+
             gFocusedCompositor = *it;
+            gFocusedCompositor.compositor->setFocused(true);
             return true;
         }
         return false;
@@ -1188,8 +1255,10 @@ namespace RdkShell
         }
         gLastKeyCode = keycode;
         gLastKeyModifiers = flags;
+        gLastKeyMetadata = metadata;
         gLastKeyEventTime = currentTime;
         gNextInactiveEventTime = gLastKeyEventTime + gInactivityIntervalInSeconds;
+        gLastKeyRepeatTime = 0.0;
 
         if ((keycode != 0) && ((keycode == gPowerKeyCode) || ((gFrontPanelButtonCode != 0) && (keycode == gFrontPanelButtonCode))) && (gPowerKeyReleaseReceived == false))
         {
@@ -1273,9 +1342,54 @@ namespace RdkShell
         }
     }
 
+    void CompositorController::onPointerMotion(uint32_t x, uint32_t y)
+    {
+        RdkShell::Logger::log(RdkShell::LogLevel::Debug, "%s, x: %d, y: %d", __func__, x, y);
+
+        if (gCursor)
+        {
+            gCursor->setPosition(x, y);
+        }
+
+        if (gFocusedCompositor.compositor)
+        {
+            gFocusedCompositor.compositor->onPointerMotion(x, y);
+        }
+    }
+
+    void CompositorController::onPointerButtonPress(uint32_t keyCode, uint32_t x, uint32_t y)
+    {
+        RdkShell::Logger::log(RdkShell::LogLevel::Information, "%s, keycode: %d, x: %d, y: %d", __func__, keyCode, x, y);
+
+        if (gCursor)
+        {
+            gCursor->setPosition(x, y);
+        }
+
+        if (gFocusedCompositor.compositor)
+        {
+            gFocusedCompositor.compositor->onPointerButtonPress(keyCode, x, y);
+        }
+    }
+
+    void CompositorController::onPointerButtonRelease(uint32_t keyCode, uint32_t x, uint32_t y)
+    {
+        RdkShell::Logger::log(RdkShell::LogLevel::Information, "%s, keycode: %d, x: %d, y: %d", __func__, keyCode, x, y);
+
+        if (gCursor)
+        {
+            gCursor->setPosition(x, y);
+        }
+
+        if (gFocusedCompositor.compositor)
+        {
+            gFocusedCompositor.compositor->onPointerButtonRelease(keyCode, x, y);
+        }
+    }
+
     bool CompositorController::createDisplay(const std::string& client, const std::string& displayName,
         uint32_t displayWidth, uint32_t displayHeight, bool virtualDisplayEnabled, uint32_t virtualWidth, uint32_t virtualHeight,
-        bool topmost, bool focus)
+        bool topmost, bool focus , bool autodestroy)
     {
         Logger::log(LogLevel::Information,
             "rdkshell createDisplay client: %s, displayName: %s, res: %d x %d, virtualDisplayEnabled: %d, virtualRes: %d x %d, topmost: %d, focus: %d\n",
@@ -1297,6 +1411,7 @@ namespace RdkShell
         }
         CompositorInfo compositorInfo;
         compositorInfo.name = clientDisplayName;
+	compositorInfo.autoDestroy = autodestroy;
         if (gRdkShellCompositorType == SURFACE)
         {
             compositorInfo.compositor = std::make_shared<RdkCompositorSurface>();
@@ -1339,6 +1454,10 @@ namespace RdkShell
                 gFocusedCompositor = compositorInfo;
                 Logger::log(LogLevel::Information,  "rdkshell_focus create: setting focus of first application created %s", gFocusedCompositor.name.c_str());
             }
+	    else if (focus)
+	    {
+		 gFocusedCompositor = compositorInfo;
+	    }
 
             if (topmost)
             {
@@ -1423,6 +1542,11 @@ namespace RdkShell
         if (gShowFullScreenImage && gFullScreenImage != nullptr)
         {
             gFullScreenImage->draw();
+        }
+
+        if (gCursor)
+        {
+            gCursor->draw();
         }
 
         if (gShowSplashImage && gSplashImage != nullptr)
@@ -1542,6 +1666,8 @@ namespace RdkShell
     {
         resolveWaitingEasterEggs();
         RdkShell::Animator::instance()->animate();
+        updateKeyRepeat();
+
         if (gEnableInactivityReporting)
         {
             double currentTime = RdkShell::seconds();
@@ -1601,10 +1727,20 @@ namespace RdkShell
             {
                 sendApplicationEvent(it->eventListeners[i], eventName, it->name);
             }
-            if ((gRdkShellCompositorType == SURFACE) && (eventName.compare(RDKSHELL_EVENT_APPLICATION_DISCONNECTED) == 0))
+	    if((gRdkShellCompositorType == SURFACE) && (eventName.compare(RDKSHELL_EVENT_APPLICATION_CONNECTED) == 0))
             {
-                clientToKill = it->name;
-                killClient = true;
+		    it->compositor->updateSurfaceCount(true);
+            }
+	    else if ((gRdkShellCompositorType == SURFACE) && (eventName.compare(RDKSHELL_EVENT_APPLICATION_DISCONNECTED) == 0))
+            {
+		it->compositor->updateSurfaceCount(false);
+		bool SurfaceCount = it->compositor->getSurfaceCount();
+
+		if((SurfaceCount == 0) && (it->autoDestroy == true ))
+                {
+                  clientToKill = it->name;
+                  killClient = true;
+	        }
             }
         }
         if (true == killClient)
@@ -1914,39 +2050,47 @@ namespace RdkShell
 
         if (eventName.compare(RDKSHELL_EVENT_DEVICE_LOW_RAM_WARNING) == 0)
         {
-            int32_t freeKb = -1;
+            int32_t freeKb = -1, availableKb = -1, usedSwapKb = -1;
             if (!data.empty())
             {
                 freeKb = data[0]["freeKb"].toInteger32();
+                availableKb = data[0]["availableKb"].toInteger32();
+                usedSwapKb = data[0]["usedSwapKb"].toInteger32();
             }
-            gRdkShellEventListener->onDeviceLowRamWarning(freeKb);
+            gRdkShellEventListener->onDeviceLowRamWarning(freeKb, availableKb, usedSwapKb);
         }
         else if (eventName.compare(RDKSHELL_EVENT_DEVICE_CRITICALLY_LOW_RAM_WARNING) == 0)
         {
-            int32_t freeKb = -1;
+            int32_t freeKb = -1, availableKb = -1, usedSwapKb = -1;
             if (!data.empty())
             {
                 freeKb = data[0]["freeKb"].toInteger32();
+                availableKb = data[0]["availableKb"].toInteger32();
+                usedSwapKb = data[0]["usedSwapKb"].toInteger32();
             }
-            gRdkShellEventListener->onDeviceCriticallyLowRamWarning(freeKb);
+            gRdkShellEventListener->onDeviceCriticallyLowRamWarning(freeKb, availableKb, usedSwapKb);
         }
         else if (eventName.compare(RDKSHELL_EVENT_DEVICE_LOW_RAM_WARNING_CLEARED) == 0)
         {
-            int32_t freeKb = -1;
+            int32_t freeKb = -1, availableKb = -1, usedSwapKb = -1;
             if (!data.empty())
             {
                 freeKb = data[0]["freeKb"].toInteger32();
+                availableKb = data[0]["availableKb"].toInteger32();
+                usedSwapKb = data[0]["usedSwapKb"].toInteger32();
             }
-            gRdkShellEventListener->onDeviceLowRamWarningCleared(freeKb);
+            gRdkShellEventListener->onDeviceLowRamWarningCleared(freeKb, availableKb, usedSwapKb);
         }
         else if (eventName.compare(RDKSHELL_EVENT_DEVICE_CRITICALLY_LOW_RAM_WARNING_CLEARED) == 0)
         {
-            int32_t freeKb = -1;
+            int32_t freeKb = -1, availableKb = -1, usedSwapKb = -1;
             if (!data.empty())
             {
                 freeKb = data[0]["freeKb"].toInteger32();
+                availableKb = data[0]["availableKb"].toInteger32();
+                usedSwapKb = data[0]["usedSwapKb"].toInteger32();
             }
-            gRdkShellEventListener->onDeviceCriticallyLowRamWarningCleared(freeKb);
+            gRdkShellEventListener->onDeviceCriticallyLowRamWarningCleared(freeKb, availableKb, usedSwapKb);
         }
         else if (eventName.compare(RDKSHELL_EVENT_ANIMATION) == 0)
         {
@@ -2250,4 +2394,128 @@ namespace RdkShell
         glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, data);
         return true;
     }
+
+    bool CompositorController::enableInputEvents(const std::string& client, bool enable)
+    {
+        CompositorListIterator it;
+        if (getCompositorInfo(client, it))
+        {
+            it->compositor->enableInputEvents(enable);
+            return true;
+        }
+        return false;
+    }
+
+    bool CompositorController::showCursor()
+    {
+        if (gCursor)
+        {
+            gCursor->show();
+            return true;
+        }
+        else
+        {
+            return false;
+        }
+    }
+
+    bool CompositorController::hideCursor()
+    {
+        if (gCursor)
+        {
+            gCursor->hide();
+            return true;
+        }
+        else
+        {
+            return false;
+        }
+    }
+
+    bool CompositorController::setCursorSize(uint32_t width, uint32_t height)
+    {
+        if (gCursor)
+        {
+            gCursor->setSize(width, height);
+            return true;
+        }
+        else
+        {
+            return false;
+        }
+    }
+
+    bool CompositorController::getCursorSize(uint32_t& width, uint32_t& height)
+    {
+        if (gCursor)
+        {
+            gCursor->getSize(width, height);
+            return true;
+        }
+        else
+        {
+            return false;
+        }
+    }
+
+    void CompositorController::setKeyRepeatConfig(bool enabled, int32_t initialDelay, int32_t repeatInterval)
+    {
+        gKeyRepeatConfig.enabled = enabled;
+        gKeyRepeatConfig.initialDelay = initialDelay;
+        gKeyRepeatConfig.repeatInterval = repeatInterval;
+
+        Logger::log(LogLevel::Information, "setKeyRepeatConfig enabled: %d, initialDelay: %d, repeatInterval: %d",
+            enabled, initialDelay, repeatInterval);
+    }
+
+    bool CompositorController::setAVBlocked(std::string callsign, bool blockAV)
+    {
+        return RdkShell::EssosInstance::instance()->setAVBlocked(callsign, blockAV);
+    }
+
+    bool CompositorController::getBlockedAVApplications(std::vector<std::string>& apps)
+    {
+        RdkShell::EssosInstance::instance()->getBlockedAVApplications(apps);
+        return true;
+    }
+
+    bool CompositorController::isErmEnabled()
+    {
+        return RdkShell::EssosInstance::instance()->isErmEnabled();
+    }
+
+    bool CompositorController::getClientInfo(const std::string& client, ClientInfo& ci)
+    {
+        CompositorListIterator it;
+        if (!getCompositorInfo(client, it))
+            return false;
+        auto c = it->compositor;
+
+        c->visible(ci.visible);
+        //c->zorder(ci.zorder);
+        c->opacity(ci.opacity);
+        c->scale(ci.sx, ci.sy);
+        c->position(ci.x, ci.y);
+        c->size(ci.width, ci.height);
+
+        return true;
+    }
+
+    bool CompositorController::setClientInfo(const std::string& client, const ClientInfo& ci)
+    {
+        CompositorListIterator it;
+        if (!getCompositorInfo(client, it))
+            return false;
+        auto c = it->compositor;
+
+        c->setVisible(ci.visible);
+        //c->setZorder(ci.zorder);
+        c->setOpacity(ci.opacity);
+        c->setScale(ci.sx, ci.sy);
+        c->setPosition(ci.x, ci.y);
+        c->setSize(ci.width, ci.height);
+
+        return true;
+    }
+
 }

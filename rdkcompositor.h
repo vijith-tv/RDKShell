@@ -46,6 +46,9 @@ namespace RdkShell
             void draw(bool &needsHolePunch, RdkShellRect& rect);
             void onKeyPress(uint32_t keycode, uint32_t flags, uint64_t metadata);
             void onKeyRelease(uint32_t keycode, uint32_t flags, uint64_t metadata);
+            void onPointerMotion(uint32_t x, uint32_t y);
+            void onPointerButtonPress(uint32_t keyCode, uint32_t x, uint32_t y);
+            void onPointerButtonRelease(uint32_t keyCode, uint32_t x, uint32_t y);
             void setPosition(int32_t x, int32_t y);
             void position(int32_t &x, int32_t &y);
             void setSize(uint32_t width, uint32_t height);
@@ -63,6 +66,8 @@ namespace RdkShell
             void setKeyMetadataEnabled(bool enable);
             int registerInputEventListener(std::function<void(const RdkShell::InputEvent&)> listener);
             void unregisterInputEventListener(int tag);
+            int registerStateChangeEventListener(std::function<void(uint32_t)> listener);
+            void unregisterStateChangeEventListener(int tag);
             void displayName(std::string& name) const;
             void closeApplication();
             void launchApplication();
@@ -74,10 +79,15 @@ namespace RdkShell
             void setVirtualResolution(uint32_t virtualWidth, uint32_t virtualHeight);
             void enableVirtualDisplay(bool enable);
             bool getVirtualDisplayEnabled();
+            void updateSurfaceCount(bool status);
+            uint32_t getSurfaceCount(void);
+            void enableInputEvents(bool enable);
+            bool getInputEventsEnabled() const;
+            void setFocused(bool focused);
 
         private:
             void prepareHolePunchRects(std::vector<WstRect> wstrects, RdkShellRect& rect);
-
+            uint32_t mSurfaceCount;
         protected:
             static void invalidate(WstCompositor *context, void *userData);
             static void clientStatus(WstCompositor *context, int status, int pid, int detail, void *userData);
@@ -87,11 +97,13 @@ namespace RdkShell
             void onSizeChangeComplete();
             void processKeyEvent(bool keyPressed, uint32_t keycode, uint32_t flags, uint64_t metadata);
             void broadcastInputEvent(const RdkShell::InputEvent &inputEvent);
+            void broadcastStateChangeEvent(uint32_t state);
             void launchApplicationInBackground();
             void shutdownApplication();
             static bool loadExtensions(WstCompositor *compositor, const std::string& clientName);
             void drawDirect(bool &needsHolePunch, RdkShellRect& rect);
             void drawFbo(bool &needsHolePunch, RdkShellRect& rect);
+            void updateWaylandState();
             
             std::string mDisplayName;
             WstCompositor *mWstContext;
@@ -110,6 +122,9 @@ namespace RdkShell
             int mInputListenerTags;
             std::mutex mInputLock;
             std::unordered_map<int, std::function<void(const RdkShell::InputEvent&)>> mInputListeners;
+            int mStateChangeListenerTags;
+            std::mutex mStateChangeLock;
+            std::unordered_map<int, std::function<void(uint32_t)>> mStateChangeListeners;
             std::string mApplicationName;
             std::thread mApplicationThread;
             RdkShell::ApplicationState mApplicationState;
@@ -123,6 +138,9 @@ namespace RdkShell
             uint32_t mVirtualHeight;
             std::shared_ptr<FrameBuffer> mFbo;
             bool mSizeChangeRequestPresent;
+            bool mInputEventsEnabled;
+            bool mSuspendedBeforeStart;
+            bool mFocused;
     };
 }
 
